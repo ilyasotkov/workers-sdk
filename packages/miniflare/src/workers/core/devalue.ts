@@ -63,11 +63,19 @@ export const structuredSerializableReducers: ReducersRevivers = {
 	Error(value) {
 		for (const ctor of ALLOWED_ERROR_CONSTRUCTORS) {
 			if (value instanceof ctor && value.name === ctor.name) {
-				return [value.name, value.message, value.stack, value.cause];
+				return [
+					value.name,
+					value.message,
+					value.stack,
+					value.cause,
+					// @ts-expect-error `remote` is a non-standard property on Error
+					value.remote,
+				];
 			}
 		}
 		if (value instanceof Error) {
-			return ["Error", value.message, value.stack, value.cause];
+			// @ts-expect-error `remote` is a non-standard property on Error
+			return ["Error", value.message, value.stack, value.cause, value.remote];
 		}
 	},
 };
@@ -99,7 +107,7 @@ export const structuredSerializableRevivers: ReducersRevivers = {
 	},
 	Error(value) {
 		assert(Array.isArray(value));
-		const [name, message, stack, cause] = value as unknown[];
+		const [name, message, stack, cause, remote] = value as unknown[];
 		assert(typeof name === "string");
 		assert(typeof message === "string");
 		assert(stack === undefined || typeof stack === "string");
@@ -107,8 +115,16 @@ export const structuredSerializableRevivers: ReducersRevivers = {
 			name
 		] as (typeof ALLOWED_ERROR_CONSTRUCTORS)[number];
 		assert(ALLOWED_ERROR_CONSTRUCTORS.includes(ctor));
-		const error = new ctor(message, { cause });
+		const options: ErrorOptions = {};
+		if (cause !== undefined) {
+			options.cause = cause;
+		}
+		const error = new ctor(message, options);
 		error.stack = stack;
+		if (remote !== undefined) {
+			// @ts-expect-error `remote` is a non-standard property on Error
+			error.remote = remote;
+		}
 		return error;
 	},
 };

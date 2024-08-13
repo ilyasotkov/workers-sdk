@@ -2029,6 +2029,97 @@ test("Miniflare: allows RPC between multiple instances", async (t) => {
 	t.is(await res.text(), "pong");
 });
 
+test("Miniflare: errors thrown by RPC methods are correctly proxied to Node.js", async (t) => {
+	const mf = new Miniflare({
+		workers: [
+			{
+				name: "a",
+				modules: true,
+				routes: ["*/a"],
+				// This worker throws a custom error in an RPC method
+				script: `
+					import { WorkerEntrypoint } from "cloudflare:workers";
+					class CustomError extends Error {
+						constructor(message, options) {
+							super(message, options);
+							this.customProp = "A custom property value";
+						}
+					}
+					export default class extends WorkerEntrypoint {
+						fetch() {
+							return new Response("{}");
+						}
+						throwError() {
+							throw new CustomError("Custom error message", {
+								cause: { hello: "world" },
+							});
+						}
+					};
+				`,
+			},
+			{
+				name: "b",
+				routes: ["*/b"],
+				serviceBindings: {
+					RPC_SERVICE: { name: "a" },
+				},
+				compatibilityFlags: ["rpc"],
+				modules: true,
+				// This worker calls an RPC method through a service binding, catches
+				// the error thrown, and returns some info about it to the test
+				script: `
+					export default {
+						async fetch(request, env) {
+							try {
+								await env.RPC_SERVICE.throwError();
+							} catch (error) {
+								return new Response(
+									JSON.stringify({
+										name: error.name,
+										message: error.message,
+										errorOwnProperties: Object.getOwnPropertyNames(error),
+										remote: error.remote,
+										stackFirstLine: error.stack?.split("\\n")[0]
+									})
+								);
+							}
+						},
+					};
+				`,
+			},
+		],
+	});
+	t.teardown(() => mf.dispose());
+
+	// Verify our expectation about how errors thrown in an RPC method are
+	// modified by workerd prior to being received by the RPC client
+	const res = await mf.dispatchFetch("http://placeholder/b");
+	const expectedErrorInfo = {
+		name: "Error",
+		message: "Custom error message",
+		errorOwnProperties: ["stack", "message", "remote"],
+		remote: true,
+		stackFirstLine: "Error: Custom error message"
+	};
+	t.deepEqual(await res.json(), expectedErrorInfo);
+
+	// Get the same error thrown and proxied to a Node.js environment (this test)
+	const bindings = await mf.getBindings<{ RPC_SERVICE: any }>('b');
+	const error = await t.throwsAsync(async () => {
+		await bindings.RPC_SERVICE.throwError();
+	}, undefined);
+
+	t.is(true, error instanceof Error);
+	t.deepEqual({
+		name: error.name,
+		message: error.message,
+		errorOwnProperties: Object.getOwnPropertyNames(error),
+		// @ts-expect-error `remote` is a non-standard property on Error
+		remote: error.remote,
+		stackFirstLine: error.stack?.split('\n')[0]
+	}, expectedErrorInfo)
+});
+
 // Only test `MINIFLARE_WORKERD_PATH` on Unix. The test uses a Node.js script
 // with a shebang, directly as the replacement `workerd` binary, which won't
 // work on Windows.
